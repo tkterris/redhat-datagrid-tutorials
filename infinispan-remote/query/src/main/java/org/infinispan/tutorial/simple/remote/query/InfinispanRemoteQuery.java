@@ -14,6 +14,7 @@ import org.infinispan.tutorial.simple.connect.Infinispan;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.stream.Collectors;
 
 import static org.infinispan.query.remote.client.ProtobufMetadataManagerConstants.PROTOBUF_METADATA_CACHE_NAME;
 
@@ -27,58 +28,85 @@ import static org.infinispan.query.remote.client.ProtobufMetadataManagerConstant
  */
 public class InfinispanRemoteQuery {
 
-   public static void main(String[] args) throws Exception {
+	public static final String KEY_CACHE_SUFFIX = "_key";
 
-      ConfigurationBuilder builder = Infinispan.connectionConfig();
+	public static void main(String[] args) throws Exception {
+		ConfigurationBuilder builder = Infinispan.connectionConfig();
 
-      // Add the Protobuf serialization context in the client
-      builder.addContextInitializer(new QuerySchemaBuilderImpl());
+		// Add the Protobuf serialization context in the client
+		builder.addContextInitializer(new QuerySchemaBuilderImpl());
 
-      // Connect to the server
-      RemoteCacheManager client = new RemoteCacheManager(builder.build());
+		// Connect to the server
+		RemoteCacheManager client = new RemoteCacheManager(builder.build());
 
-      // Create and add the Protobuf schema in the server
-      addPersonSchema(client);
+		String keyCacheName = Infinispan.TUTORIAL_CACHE_NAME + KEY_CACHE_SUFFIX;
+		client.administration().getOrCreateCache(keyCacheName, (String) null);
 
-      // Get the people cache, create it if needed with the default configuration
-      RemoteCache<String, Person> peopleCache = client.getCache(Infinispan.TUTORIAL_CACHE_NAME);
+		// Create and add the Protobuf schema in the server
+		addPersonSchema(client);
 
-      // Create the persons dataset to be stored in the cache
-      Map<String, Person> people = new HashMap<>();
-      people.put("1", new Person("Oihana", "Rossignol", 2016, "Paris"));
-      people.put("2", new Person("Elaia", "Rossignol", 2018, "Paris"));
-      people.put("3", new Person("Yago", "Steiner", 2013, "Saint-Mandé"));
-      people.put("4", new Person("Alberto", "Steiner", 2016, "Paris"));
+		// Get the people cache, create it if needed with the default configuration
+		RemoteCache<Person, String> peopleCache = client.getCache(Infinispan.TUTORIAL_CACHE_NAME);
+		peopleCache.addClientListener(new KeyCacheClientListener<Person>(client, keyCacheName));
 
-      // Put all the values in the cache
-      peopleCache.putAll(people);
+		// Create the persons dataset to be stored in the cache
+		Map<Person, String> people = new HashMap<>();
+		people.put(new Person("Oihana", "Rossignol", 2016, "Paris"), "1");
+		people.put(new Person("Elaia", "Rossignol", 2018, "Paris"), "2");
+		people.put(new Person("Yago", "Steiner", 2013, "Saint-Mandé"), "3");
+		people.put(new Person("Alberto", "Steiner", 2016, "Paris"), "4");
 
-      // Get a query factory from the cache
-      QueryFactory queryFactory = Search.getQueryFactory(peopleCache);
+		// Put all the values in the cache
+		peopleCache.putAll(people);
+		
+		//Listener is async, so wait to complete
+		Thread.sleep(1000);
 
-      // Create a query with lastName parameter
-      Query query = queryFactory.create("FROM tutorial.Person p where p.lastName = :lastName");
+		// Get a query factory from the cache
+		QueryFactory queryFactory = Search.getQueryFactory(client.getCache(keyCacheName));
 
-      // Set the parameter value
-      query.setParameter("lastName", "Rossignol");
+		// Create a query with lastName parameter
+		Query<Person> query = queryFactory.create("FROM tutorial.Person p where p.lastName = :lastName");
 
-      // Execute the query
-      List<Person> rossignols = query.execute().list();
+		// Set the parameter value
+		query.setParameter("lastName", "Rossignol");
 
-      // Print the results
-      System.out.println(rossignols);
+		// Execute the query
+		List<Person> rossignols = query.execute().list();
 
-      // Stop the client and release all resources
-      client.stop();
-   }
+		// Print the results
+		System.out.printf("Matching query results: %s%n", rossignols);
+		System.out.printf("People cache size: %d%n", peopleCache.size());
 
-   private static void addPersonSchema(RemoteCacheManager cacheManager) {
-      // Retrieve metadata cache
-      RemoteCache<String, String> metadataCache =
-            cacheManager.getCache(PROTOBUF_METADATA_CACHE_NAME);
+		System.out.println("Removing queried entries");
+		rossignols.stream().forEach(key -> peopleCache.remove(key));
+		/*
+		 * peopleCache.removeAll(rossignols); //"removeAll" operation doesnt exist
+		 */
+		/*
+		 * //following logic doesn't work, i.e. "null" values aren't considered removals
+		 * Map<Person, String> keysToRemove = new HashMap<>();
+		 * rossignols.stream().forEach(key -> keysToRemove.put(key, null));
+		 * peopleCache.putAll(keysToRemove);
+		 */
 
-      // Define the new schema on the server too
-      GeneratedSchema schema = new QuerySchemaBuilderImpl();
-      metadataCache.put(schema.getProtoFileName(), schema.getProtoFile());
-   }
+		//Listener is async, so wait to complete
+		Thread.sleep(1000);
+
+		rossignols = query.execute().list();
+		System.out.printf("Matching query results: %s%n", rossignols);
+		System.out.printf("People cache size: %d%n", peopleCache.size());
+
+		// Stop the client and release all resources
+		client.stop();
+	}
+
+	private static void addPersonSchema(RemoteCacheManager cacheManager) {
+		// Retrieve metadata cache
+		RemoteCache<String, String> metadataCache = cacheManager.getCache(PROTOBUF_METADATA_CACHE_NAME);
+
+		// Define the new schema on the server too
+		GeneratedSchema schema = new QuerySchemaBuilderImpl();
+		metadataCache.put(schema.getProtoFileName(), schema.getProtoFile());
+	}
 }
